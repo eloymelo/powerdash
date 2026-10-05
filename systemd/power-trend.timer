@@ -1,0 +1,11 @@
+[Unit]
+Description=Run PowerDash trend snapshot periodically
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=2h
+Persistent=true
+Unit=power-trend.service
+
+[Install]
+WantedBy=timers.target

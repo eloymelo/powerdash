@@ -1,0 +1,15 @@
+[Unit]
+Description=PowerDash power estimator
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/power-estimator
+Restart=always
+RestartSec=5
+
+StateDirectory=powerdash
+RuntimeDirectory=powerdash
+
+[Install]
+WantedBy=multi-user.target

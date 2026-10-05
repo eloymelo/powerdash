@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+
+# Scheduled snapshot of average power and projected monthly energy cost.
+
+set -u
+
+CONFIG="/etc/powerdash.conf"
+[[ -r "$CONFIG" ]] && source "$CONFIG"
+
+RATE="${RATE:-0.15}"
+CURRENCY_SYMBOL="${CURRENCY_SYMBOL:-$}"
+DATA_DIR="${DATA_DIR:-/var/lib/powerdash}"
+
+LOG_FILE="${DATA_DIR}/power.log"
+TREND_FILE="${DATA_DIR}/trend.log"
+
+HOURS_PER_MONTH="730"
+
+mkdir -p "$DATA_DIR"
+
+[[ -s "$LOG_FILE" ]] || exit 0
+
+# Avoid duplicate snapshots when triggered manually near a timer run.
+if [[ -s "$TREND_FILE" ]]; then
+    LAST_TS="$(
+        tail -n 1 "$TREND_FILE" |
+            cut -d'|' -f1 |
+            sed 's/[[:space:]]*$//'
+    )"
+
+    CONVERTED="$(
+        sed -E \
+            's#^([0-9]{2})/([0-9]{2})/([0-9]{4}) #\3-\2-\1 #' \
+            <<< "$LAST_TS"
+    )"
+
+    LAST_EPOCH="$(
+        date -d "$CONVERTED" +%s 2>/dev/null || true
+    )"
+
+    NOW_EPOCH="$(date +%s)"
+
+    if [[ -n "$LAST_EPOCH" ]] &&
+       (( NOW_EPOCH - LAST_EPOCH < 1800 )); then
+        exit 0
+    fi
+fi
+
+IFS='|' read -r \
+    AVG_W \
+    MIN_W \
+    MAX_W \
+    SAMPLES \
+    FIRST_TS \
+    LAST_TS < <(
+    awk '
+    $NF ~ /^[0-9]+([.][0-9]+)?$/ {
+        w = $NF + 0
+
+        if (n == 0) {
+            min = max = w
+            first = $1 " " $2
+        }
+
+        total += w
+        n++
+
+        if (w < min) min = w
+        if (w > max) max = w
+
+        last = $1 " " $2
+    }
+
+    END {
+        if (n) {
+            printf "%.4f|%.4f|%.4f|%d|%s|%s\n",
+                total/n,
+                min,
+                max,
+                n,
+                first,
+                last
+        }
+    }' "$LOG_FILE"
+)
+
+[[ -n "${AVG_W:-}" ]] || exit 0
+
+convert_ts() {
+    sed -E \
+        's#^([0-9]{2})/([0-9]{2})/([0-9]{4}) #\3-\2-\1 #' \
+        <<< "$1"
+}
+
+FIRST_EPOCH="$(
+    date -d "$(convert_ts "$FIRST_TS")" +%s 2>/dev/null || true
+)"
+
+LAST_EPOCH="$(
+    date -d "$(convert_ts "$LAST_TS")" +%s 2>/dev/null || true
+)"
+
+if [[ -n "$FIRST_EPOCH" && -n "$LAST_EPOCH" ]]; then
+    LOG_DAYS="$(
+        awk \
+            -v f="$FIRST_EPOCH" \
+            -v l="$LAST_EPOCH" '
+        BEGIN {
+            seconds = l - f
+
+            if (seconds < 0)
+                seconds = 0
+
+            printf "%.2f", seconds / 86400
+        }'
+    )"
+else
+    LOG_DAYS="0.00"
+fi
+
+MONTHLY_KWH="$(
+    awk \
+        -v w="$AVG_W" \
+        -v h="$HOURS_PER_MONTH" \
+        'BEGIN { printf "%.2f", w*h/1000 }'
+)"
+
+MONTHLY_COST="$(
+    awk \
+        -v k="$MONTHLY_KWH" \
+        -v r="$RATE" \
+        'BEGIN { printf "%.2f", k*r }'
+)"
+
+NOW_TS="$(date '+%d/%m/%Y %H:%M:%S')"
+
+printf '%s | %.2fW | %.2f kWh | %s %.2f | %s days | %s samples\n' \
+    "$NOW_TS" \
+    "$AVG_W" \
+    "$MONTHLY_KWH" \
+    "$CURRENCY_SYMBOL" \
+    "$MONTHLY_COST" \
+    "$LOG_DAYS" \
+    "$SAMPLES" \
+    >> "$TREND_FILE"

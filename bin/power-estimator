@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+
+set -u
+
+CONFIG="/etc/powerdash.conf"
+[[ -r "$CONFIG" ]] && source "$CONFIG"
+
+DATA_DIR="${DATA_DIR:-/var/lib/powerdash}"
+RUNTIME_DIR="${RUNTIME_DIR:-/run/powerdash}"
+
+LOG_FILE="${DATA_DIR}/power.log"
+CURRENT_FILE="${RUNTIME_DIR}/current.env"
+ROLLING_FILE="${RUNTIME_DIR}/rolling.csv"
+
+FIXED_LOAD_W="${FIXED_LOAD_W:-35}"
+PSU_EFF_LOW="${PSU_EFF_LOW:-0.85}"
+PSU_EFF_HIGH="${PSU_EFF_HIGH:-0.90}"
+PSU_SWITCH_W="${PSU_SWITCH_W:-100}"
+CALIBRATION_FACTOR="${CALIBRATION_FACTOR:-1.00}"
+SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-5}"
+AVG_WINDOW="${AVG_WINDOW:-60}"
+
+mkdir -p "$DATA_DIR" "$RUNTIME_DIR"
+touch "$LOG_FILE"
+
+is_number() {
+    [[ ${1:-} =~ ^[0-9]+([.][0-9]+)?$ ]]
+}
+
+read_cpu_watts() {
+    turbostat --quiet --interval 1 --num_iterations 1 --show PkgWatt 2>/dev/null |
+        tail -n 1 |
+        awk '{
+            for (i = NF; i >= 1; i--) {
+                if ($i ~ /^[0-9]+([.][0-9]+)?$/) {
+                    print $i
+                    exit
+                }
+            }
+        }'
+}
+
+read_gpu_watts() {
+    nvidia-smi \
+        --query-gpu=power.draw \
+        --format=csv,noheader,nounits 2>/dev/null |
+        head -n 1 |
+        awk '{gsub(/[^0-9.]/, "", $0); print $0}'
+}
+
+echo "power-estimator: starting; data=$DATA_DIR interval=${SAMPLE_INTERVAL}s"
+
+while true; do
+    cycle_start=$(date +%s)
+
+    CPU_W="$(read_cpu_watts)"
+    GPU_W="$(read_gpu_watts)"
+
+    # Skip samples when a sensor cannot be read.
+    # Using fabricated fallback values would distort long-term averages.
+    if ! is_number "$CPU_W" || ! is_number "$GPU_W"; then
+        echo "$(date -Is) sensor read failed: CPU='${CPU_W:-missing}' GPU='${GPU_W:-missing}'" >&2
+        sleep "$SAMPLE_INTERVAL"
+        continue
+    fi
+
+    read -r INTERNAL_W PSU_EFF WALL_W < <(
+        awk \
+            -v cpu="$CPU_W" \
+            -v gpu="$GPU_W" \
+            -v fixed="$FIXED_LOAD_W" \
+            -v threshold="$PSU_SWITCH_W" \
+            -v low="$PSU_EFF_LOW" \
+            -v high="$PSU_EFF_HIGH" \
+            -v calibration="$CALIBRATION_FACTOR" '
+        BEGIN {
+            internal = cpu + gpu + fixed
+            eff = (internal < threshold) ? low : high
+            wall = (internal / eff) * calibration
+
+            printf "%.2f %.3f %.2f\n", internal, eff, wall
+        }'
+    )
+
+    printf '%s,%s,%s,%s\n' \
+        "$CPU_W" \
+        "$GPU_W" \
+        "$INTERNAL_W" \
+        "$WALL_W" \
+        >> "$ROLLING_FILE"
+
+    tail -n "$AVG_WINDOW" "$ROLLING_FILE" > "${ROLLING_FILE}.tmp"
+    mv "${ROLLING_FILE}.tmp" "$ROLLING_FILE"
+
+    read -r AVG_CPU AVG_GPU AVG_INTERNAL AVG_WALL < <(
+        awk -F',' '
+        {
+            cpu += $1
+            gpu += $2
+            internal += $3
+            wall += $4
+            n++
+        }
+
+        END {
+            if (n) {
+                printf "%.2f %.2f %.2f %.2f\n",
+                    cpu/n,
+                    gpu/n,
+                    internal/n,
+                    wall/n
+            } else {
+                print "0 0 0 0"
+            }
+        }' "$ROLLING_FILE"
+    )
+
+    TIMESTAMP="$(date '+%d/%m/%Y %H:%M:%S')"
+
+    # Persistent historical record:
+    # DD/MM/YYYY HH:MM:SS WALL_WATTS
+    printf '%s %.2f\n' \
+        "$TIMESTAMP" \
+        "$WALL_W" \
+        >> "$LOG_FILE"
+
+    # Write the current state atomically so readers never see a partial file.
+    cat > "${CURRENT_FILE}.tmp" <<EOF
+TIMESTAMP="$TIMESTAMP"
+CPU_W="$CPU_W"
+GPU_W="$GPU_W"
+FIXED_LOAD_W="$FIXED_LOAD_W"
+INTERNAL_W="$INTERNAL_W"
+PSU_EFF="$PSU_EFF"
+WALL_W="$WALL_W"
+AVG_CPU="$AVG_CPU"
+AVG_GPU="$AVG_GPU"
+AVG_INTERNAL="$AVG_INTERNAL"
+AVG_WALL="$AVG_WALL"
+AVG_WINDOW="$AVG_WINDOW"
+EOF
+
+    mv "${CURRENT_FILE}.tmp" "$CURRENT_FILE"
+    chmod 0644 "$CURRENT_FILE"
+
+    printf '%s CPU=%sW GPU=%sW Internal=%sW Wall=%sW Avg%s=%sW\n' \
+        "$TIMESTAMP" \
+        "$CPU_W" \
+        "$GPU_W" \
+        "$INTERNAL_W" \
+        "$WALL_W" \
+        "$AVG_WINDOW" \
+        "$AVG_WALL"
+
+    cycle_end=$(date +%s)
+    elapsed=$((cycle_end - cycle_start))
+    sleep_for=$((SAMPLE_INTERVAL - elapsed))
+
+    (( sleep_for < 1 )) && sleep_for=1
+
+    sleep "$sleep_for"
+done

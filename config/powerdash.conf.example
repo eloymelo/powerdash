@@ -1,0 +1,34 @@
+# PowerDash configuration
+#
+# Copy this file to /etc/powerdash.conf and adjust the values for your system.
+
+# Electricity price per kWh.
+RATE="0.15"
+
+# Currency symbol used by the dashboard and cost reports.
+CURRENCY_SYMBOL="$"
+
+# Estimated power used by components that PowerDash cannot measure directly.
+# This normally includes the motherboard, memory, storage, fans, and controllers.
+FIXED_LOAD_W="35"
+
+# Approximate PSU efficiency below and above PSU_SWITCH_W.
+PSU_EFF_LOW="0.85"
+PSU_EFF_HIGH="0.90"
+PSU_SWITCH_W="100"
+
+# Optional calibration multiplier.
+# Keep this at 1.00 unless you have compared PowerDash with a wall power meter.
+CALIBRATION_FACTOR="1.00"
+
+# Target interval between measurements, in seconds.
+SAMPLE_INTERVAL="5"
+
+# Number of samples used for the rolling average.
+AVG_WINDOW="60"
+
+# Persistent application data.
+DATA_DIR="/var/lib/powerdash"
+
+# Runtime state. This directory is normally recreated at boot.
+RUNTIME_DIR="/run/powerdash"

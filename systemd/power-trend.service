@@ -1,0 +1,7 @@
+[Unit]
+Description=PowerDash trend snapshot
+After=power-estimator.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/power-trend

@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+
+set -u
+
+CONFIG="/etc/powerdash.conf"
+[[ -r "$CONFIG" ]] && source "$CONFIG"
+
+RATE="${RATE:-0.15}"
+CURRENCY_SYMBOL="${CURRENCY_SYMBOL:-\$}"
+DATA_DIR="${DATA_DIR:-/var/lib/powerdash}"
+
+LOG_FILE="${DATA_DIR}/power.log"
+
+HOURS_PER_MONTH="730"
+
+if [[ ! -s "$LOG_FILE" ]]; then
+    echo "No power data found at: $LOG_FILE"
+    exit 1
+fi
+
+STATS="$(
+    awk '
+    $NF ~ /^[0-9]+([.][0-9]+)?$/ {
+        w = $NF + 0
+
+        if (n == 0) {
+            min = max = w
+            first = $1 " " $2
+        }
+
+        total += w
+        n++
+
+        if (w < min) min = w
+        if (w > max) max = w
+
+        last = $1 " " $2
+        latest = w
+    }
+
+    END {
+        if (n) {
+            printf "%.4f|%.4f|%.4f|%.4f|%d|%s|%s\n",
+                total/n,
+                min,
+                max,
+                latest,
+                n,
+                first,
+                last
+        }
+    }' "$LOG_FILE"
+)"
+
+IFS='|' read -r \
+    AVG_W \
+    MIN_W \
+    MAX_W \
+    LATEST_W \
+    SAMPLES \
+    FIRST_TS \
+    LAST_TS <<< "$STATS"
+
+to_epoch() {
+    local ts="$1"
+    local converted
+
+    converted="$(
+        sed -E \
+            's#^([0-9]{2})/([0-9]{2})/([0-9]{4}) #\3-\2-\1 #' \
+            <<< "$ts"
+    )"
+
+    date -d "$converted" +%s 2>/dev/null || true
+}
+
+FIRST_EPOCH="$(to_epoch "$FIRST_TS")"
+LAST_EPOCH="$(to_epoch "$LAST_TS")"
+
+if [[ -n "$FIRST_EPOCH" &&
+      -n "$LAST_EPOCH" &&
+      "$LAST_EPOCH" -ge "$FIRST_EPOCH" ]]; then
+
+    DAYS="$(
+        awk \
+            -v f="$FIRST_EPOCH" \
+            -v l="$LAST_EPOCH" \
+            'BEGIN { printf "%.2f", (l-f)/86400 }'
+    )"
+else
+    DAYS="0.00"
+fi
+
+read -r \
+    DAILY_KWH \
+    DAILY_COST \
+    MONTHLY_KWH \
+    MONTHLY_COST < <(
+
+    awk \
+        -v w="$AVG_W" \
+        -v rate="$RATE" \
+        -v hpm="$HOURS_PER_MONTH" '
+    BEGIN {
+        daily_kwh = w * 24 / 1000
+        monthly_kwh = w * hpm / 1000
+
+        printf "%.2f %.2f %.2f %.2f\n",
+            daily_kwh,
+            daily_kwh * rate,
+            monthly_kwh,
+            monthly_kwh * rate
+    }'
+)
+
+printf '\n'
+printf '┌────────────────────────────────────────────────────────────┐\n'
+printf '│                   POWERDASH ESTIMATE                       │\n'
+printf '├────────────────────────────────────────────────────────────┤\n'
+printf '│ Log period      %10s days   Samples %16s │\n' \
+    "$DAYS" "$SAMPLES"
+printf '│ Latest wall     %10.2f W                                │\n' \
+    "$LATEST_W"
+printf '│ Average wall    %10.2f W                                │\n' \
+    "$AVG_W"
+printf '│ Min / Max       %7.2f W / %-7.2f W                      │\n' \
+    "$MIN_W" "$MAX_W"
+printf '├────────────────────────────────────────────────────────────┤\n'
+printf '│ Daily estimate  %10.2f kWh   %-3s %10.2f             │\n' \
+    "$DAILY_KWH" "$CURRENCY_SYMBOL" "$DAILY_COST"
+printf '│ Monthly (730h)  %10.2f kWh   %-3s %10.2f             │\n' \
+    "$MONTHLY_KWH" "$CURRENCY_SYMBOL" "$MONTHLY_COST"
+printf '│ Tariff          %-3s %10.3f / kWh                       │\n' \
+    "$CURRENCY_SYMBOL" "$RATE"
+printf '└────────────────────────────────────────────────────────────┘\n'
+printf 'Software estimate: CPU + GPU + platform load + PSU model.\n'
+printf '\n'
