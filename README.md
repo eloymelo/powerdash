@@ -176,6 +176,14 @@ powerdash/
 └── README.md
 ```
 
+## !!! TESTING STATUS !!! PLEASE READ !!!
+
+PowerDash is currently maintained without access to a dedicated Linux server for hardware testing.
+
+The shell scripts are checked for syntax errors and the project structure is kept consistent, but the current release has not yet been validated end to end on a clean Linux installation.
+
+If you test PowerDash on compatible hardware, bug reports and installation feedback are welcome.
+
 ## License
 
 PowerDash is available under the MIT License.
