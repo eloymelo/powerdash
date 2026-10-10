@@ -176,7 +176,7 @@ powerdash/
 └── README.md
 ```
 
-## !!! TESTING STATUS !!! PLEASE READ !!!
+## Testing & Validation Notice
 
 PowerDash is currently maintained without access to a dedicated Linux server for hardware testing.
 
